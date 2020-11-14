@@ -5,4 +5,4 @@ Barebones bootloaders
 | ------------- | ------------------ |-------------- | -------- | ----: | ------------: |
 | VSC83XX       | vsc83xx/bsl1.eep   | Serial        | custom   |    96 |          1.2% |
 | VSC83XX       | vsc83xx/xmodem.eep | Serial        | xmodem   |   436 |          5.3% |
-| TUSB3200      | tusb3200/boot.eep  | USB           | TUSB3210 |  1004 |         12.3% |
+| TUSB3200      | tusb3200/boot.eep  | USB           | TUSB3210 |   920 |         11.2% |

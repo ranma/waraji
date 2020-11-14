@@ -1,3 +1,28 @@
+;-----------------------------------------------------------
+; Custom TUSB3200 8052 bootloader (TUSB3210 protocol).
+;
+; Copyright (C) 2020 Tobias Diedrich
+; GNU GENERAL PUBLIC LICENSE Version 3 or later.
+;
+; Since it uses a ROP chain for updating the code ram, it is
+; tightly tied to the mask rom, which hopefully only has a
+; single revision.
+;
+; Tested on:
+; Focusrite Saffire 6 USB
+;
+; To force the TUSB3200 into bootloader mode, simply
+; short the I2C clock and data lines of the I2C eeprom.
+;
+; Serial settings: 57600 8n1
+;------------------------------------------------------------
+
+.equ CODERAM_SIZE, 8192  ; TUSB3200 has 8KiB of code ram
+; TUSB3200 code ram is mapped either as ROM or as XRAM
+; (depending on MEMCFG bit 7), but not accessible as both.
+; So we resort to a ROP chain back to the boot rom to poke
+; into code ram.
+
 .equ GLOBCTL, 0xffb1
 .equ OEPINT, 0xffb4
 .equ IEPINT, 0xffb3
@@ -12,8 +37,11 @@
 .equ USBFADR,   0xffff
 .equ USBIMSK,   0xfffd
 
-.equ ROP_MOVX_DPTR_A, 0x8084 ; 0x8084  movx @DPTR, A
-.equ ROP_POP_DPL_DPH_B_ACC, 0x80da ; 0x80da  pop DPL; pop DPH; pop B; pop ACC
+; BootROM ROP gadget @0x8084: "movx @DPTR, A; ret"
+.equ ROP_MOVX_DPTR_A, 0x8084
+; BootROM ROP gadget @0x80da: "pop DPL; pop DPH; pop B; pop ACC; reti"
+.equ ROP_POP_DPL_DPH_B_ACC, 0x80da
+
 .equ RESET_TO_PAYLOAD, 0x8a95 ; reset state and jump to payload (0)
 .equ RESET_TO_BOOTLOADER, 0x8ad9 ; reset state and jump to payload (0)
 ; reg 0xffb0 MEMCFG; write 0 to enable code ram writes, 1 to enable code execution
@@ -71,7 +99,7 @@
 	.byte (ROP_POP_DPL_DPH_B_ACC >> 8)
 .endm
 
-.area RSEG    (ABS,DATA)
+.area DSEG (ABS,DATA)
 .org 0x0000
 AR0: .ds 1
 AR1: .ds 1
@@ -90,7 +118,7 @@ BR5: .ds 1
 BR6: .ds 1
 BR7: .ds 1
 
-.area BSEG    (ABS,DATA)
+; bit-adressable area
 .org 0x0020
 usbState: .ds 1
 .equ usbStateSetupValid, 0
@@ -101,16 +129,9 @@ usbState: .ds 1
 .equ usbStateStringCnt, 5
 .equ usbState6, 6
 .equ usbState7, 7
-miscState: .ds 1
-.equ uartEmpty, 8
 
-.org 0x0080
-.equ UartBufSize, 0x40
-.equ StackSize, 0x40
-stack: .ds StackSize
-uartbuf: .ds UartBufSize
-
-.area DSEG (DATA)
+; regular data
+.org 0x0030
 bmRequestType: .ds 1
 bRequest:      .ds 1
 wValueLo:      .ds 1
@@ -124,32 +145,44 @@ txPtrLo:  .ds 1
 txPtrHi:  .ds 1
 txSize:   .ds 1
 
-uartReadPtr:   .ds 1
-uartWritePtr:  .ds 1
-
+rop_stack_ret_oldsp: .ds 1
 rop_stack_ret_addr: .ds 2
-rop_stack_template: .ds (rop_template_end - rop_template)
+rop_stack_template_iram: .ds (rop_template_end - rop_template_start)
 rop_stack_end:
 
+
+; high iram area
+.org 0x0080
+.equ StackSize, 0x40
+stack: .ds StackSize
+
 .area CSEG (CODE,ABS)
-_reset: ljmp _start
-.org 0x20
-	ajmp bad_vec
 
-.org 0x23
-	push PSW
-	setb PSW.3
-	mov R7, A
-	ajmp uart_vec
+.equ BOOT_SIZE, (_bootloader_end - _bootloader_start)
+.equ RELOC_SRC, (_bootloader_start - _reset)
+.equ VIRTUAL_START, (CODERAM_SIZE - (_bootloader_end - _reset))
+.equ ACALL_MASK, 0x7ff ; 2KiB boundary
+.equ ACALL_OFS, (VIRTUAL_START & ACALL_MASK)
 
-bad_vec:
-	clr TI
-	mov SBUF, #'!'
-bad_vec_wait:
-	jnb TI, bad_vec_wait
-	sjmp bad_vec
+.org VIRTUAL_START
 
-_start:
+_reset:
+;-----------------------------------------------------------------------------
+; Init code, ok to overwrite later.
+;
+; Relocates code to top of memory.
+;
+; For the assembler this is located at RELOC_ADDR, but it really is running at
+; @0x0000 on boot.  Since there is no relative call instruction, we need to do
+; some arithmetic and substract ACALL_OFS on any acall done before the code
+; relocation is done.
+;-----------------------------------------------------------------------------
+	; Speed up CPU
+	mov R0, #GLOBCTL
+	mov A, #0x84 ; Enable 24MHz CPU clock and USB block
+	movx @R0, A
+
+	; Clear IRAM
 	clr A
 	mov PSW, A
 	mov R0, A
@@ -158,18 +191,9 @@ clear_iram:
 	mov @R0, A
 	djnz R0, clear_iram
 
-	mov SP, #0x6f
+	mov SP, #stack
 
-	; Port defaults
-	mov P1, #0xdf  ; Turn on LED1 (LD1)
-	mov P2, #0xff  ; Select 0xff00 as base for MOVX with R0/R1
-	orl P3, #0x3b
-	anl P3, #0xef  ; Turn on front panel USB LED
-
-	mov R0, #GLOBCTL
-	mov A, #0xC4 ; Enable 24MHz CPU clock, enable USB block
-	movx @R0, A
-
+	; Set up UART
 	mov RCAP2H, #0xff
 	mov RCAP2L, #0xf3 ; 57600 baud (~57692; 0.16% error)
 	mov T2CON, #0x34
@@ -177,35 +201,83 @@ clear_iram:
 	mov TH2, #0xff
 	mov TL2, #0xff
 
-	clr IT0        ; Trigger extint on falling edge
+	; Port defaults
+	mov P2, #0xff  ; Select 0xff00 as base for MOVX with R0/R1
 
-	mov uartReadPtr, #uartbuf
-	mov uartWritePtr, #uartbuf
-	setb uartEmpty
-	mov IE, #0x90        ; Enable interrupts (uart only)
+	; Copy ROP template into iram
+	mov DPTR, #(rop_template_start - _reset)
 
-	mov DPTR, #rop_template
-	mov R0, #rop_stack_template
-	mov R1, #(rop_template_end - rop_template)
-rop_stack_copy:
-	acall fetchc_postinc
-	mov @R0, A
-	inc R0
-	djnz R1, rop_stack_copy
-
-	mov DPTR, #message_hello
-	acall serial_puts
-
-wait_uart_finished:
-	jnb uartEmpty, wait_uart_finished
-
-	mov DPTR, #DATA_TEST
-	mov A, #0xa5
-	acall code_poke
-	mov DPTR, #DATA_TEST
+	mov R0, #rop_stack_template_iram
+	mov R1, #(rop_template_end - rop_template_start)
+rop_stack_copy_loop:
 	clr A
 	movc A, @A+DPTR
-	acall serial_hex
+	inc DPTR
+	mov @R0, A
+	inc R0
+	djnz R1, rop_stack_copy_loop
+
+	; Destination address
+	mov wValueHi, #(_bootloader_start >> 8)
+	mov wValueLo, #_bootloader_start
+	; Source address
+	mov wIndexHi, #(RELOC_SRC >> 8)
+	mov wIndexLo, #RELOC_SRC
+	; Number of bytes to copy
+	mov R6, #(BOOT_SIZE >> 8)
+	mov R7, #BOOT_SIZE
+	inc R6 ; +1 since with djnz this is a count
+
+_relocate_loop:
+	; Read source byte and increment source address
+	mov DPH, wIndexHi
+	mov DPL, wIndexLo
+	clr A
+	movc A, @A+DPTR
+	inc DPTR
+	mov wIndexHi, DPH
+	mov wIndexLo, DPL
+
+	; Load destination address
+	mov DPH, wValueHi
+	mov DPL, wValueLo
+
+	acall raw_code_poke - ACALL_OFS
+	pop SP ; Restore stack after ROP
+	mov R5, SP
+
+	; Increment destination address
+	mov DPH, wValueHi
+	mov DPL, wValueLo
+	inc DPTR
+	mov wValueHi, DPH
+	mov wValueLo, DPL
+
+	djnz R7, _relocate_loop
+	djnz R6, _relocate_loop
+
+	; Relocate done, jump to start address.
+	ljmp _bootloader_start
+
+rop_template_start:
+	; 0
+	rop_movx_dptr_a
+	; 2
+	rop_set_dptr_and_a MEMCFG 0x01
+
+	; 8
+	rop_movx_dptr_a
+	; 10
+	rop_set_dptr_and_a DATA_TEST 0x5a
+	; 16
+rop_template_end:
+
+	;------------------------------------------------
+	; Entry point after relocation to end of code ram
+	;------------------------------------------------
+_bootloader_start:
+	mov DPTR, #message_hello
+	acall serial_puts
 
 	acall usb_init
 
@@ -413,6 +485,7 @@ setup_dth_vend_reboot_bootloader:
 	movx @R0, A
 	inc R0
 	movx @R0, A
+
 	ljmp RESET_TO_BOOTLOADER
 
 setup_dth_vend_write_i2c:
@@ -707,92 +780,60 @@ serial_hex_digit:
 	; fall through to serial_write
 
 serial_write:
-	push AR0
-	push AR2
-	mov R2, A
-serial_write_wait:
-	mov A, uartWritePtr
-	mov R0, A
-	inc A
-	orl A, #uartbuf
-	xrl A, uartReadPtr
-	jz serial_write_wait  ; Wait for buffer to empty
-	mov @R0, AR2
-	mov A, R0
-	inc A
-	orl A, #uartbuf
-	mov uartWritePtr, A
-serial_write_exit:
-	pop AR2
-	pop AR0
-	jbc uartEmpty, serial_trigger
-	ret
-
-serial_trigger:
-	setb TI
-	ret
-
-uart_vec:
-	jnb RI, uart_check_tx
-	clr RI
-uart_check_tx:
-	jnb TI, uart_ret
 	clr TI
-	mov R1, uartReadPtr
-	mov A, R1
-	xrl A, uartWritePtr
-	jz uart_empty
-	mov A, @R1
-	inc R1
 	mov SBUF, A
-	mov A, R1
-	orl A, #uartbuf
-	mov uartReadPtr, A
-uart_ret:
-	mov A, R7
-	pop PSW
-	reti
-uart_empty:
-	setb uartEmpty
-	sjmp uart_ret
+serial_write_wait:
+	jnb TI,serial_write_wait
+	ret
 
 code_poke:
+	acall raw_code_poke
+	pop SP ; Restore stack after ROP
+	ret
+
+;--------------------------------------------------------
+; Poking into code ram using ROP gadgets:
+; Write A to address at DPTR
+; !!!Caller must call "pop SP" after it returns to pop
+; the old SP from the ROP stack.
+;
+; Clobbers: A, B, R0, DPTR, SP
+; Clobbers: Hidden interrupt mask (iret used in ROP)
+;--------------------------------------------------------
+raw_code_poke:
+	; Write the destination address into ROP template
 	mov R0, #(rop_stack_end - 3)
 	mov @R0, DPL
 	dec R0
 	mov @R0, DPH
+	; Skip value written to B register
 	dec R0
+	; Write value to poke into ROP template
 	dec R0
 	mov @R0, A
-	push IE
-	mov IE, #0 ; disable interrupts
 
-	mov R7, SP
-	mov SP, #(rop_stack_ret_addr - 1)
-	acall do_code_poke
-	mov SP, R7
+	; Pop return address from stack
+	pop DPL
+	pop DPH
 
-	pop IE
-	ret
+	; Save original SP and load address to save it to
+	mov A, #(rop_stack_ret_oldsp - 1)
+	xch A, SP
 
-do_code_poke:
+	; Write original SP and return address into ROP template
+	push ACC
+	push DPH
+	push DPL
+
+	; Setup SP to point to end of rop template
 	mov SP, #(rop_stack_end - 1)
+
+	; Args for first gadget
 	mov DPTR, #MEMCFG
 	clr A  ; Map coderam as XRAM (and unshadow the bootrom)
+
+	; All systems go, ROP ROP ROP!
 	ljmp ROP_MOVX_DPTR_A
-
-rop_template:
-	; 0
-	rop_movx_dptr_a
-	; 2
-	rop_set_dptr_and_a MEMCFG 0x01
-
-	; 8
-	rop_movx_dptr_a
-	; 10
-	rop_set_dptr_and_a DATA_TEST 0x5a
-	; 16
-rop_template_end:
 
 usb_init_data:
 .byte 0x68, 0x8c  ; IEPCNF0 = 0x8c (Enable EP & irq, stalled)
@@ -828,6 +869,7 @@ usb_cnf_desc:
 .byte 0           ; iConfiguration
 .byte 0x80        ; bmAttributes (bus powered)
 .byte 498/2       ; bMaxPower (498mA)
+
 .byte 0x09, 0x04  ; Size, type (interface)
 .byte 0           ; bInterfacenNmber
 .byte 0           ; bAlternateSetting
@@ -842,3 +884,5 @@ message_hello:
 .ascii "\r\nHello world!\r\n\0"
 message_rst:
 .ascii "\r\nR\0"
+
+_bootloader_end:

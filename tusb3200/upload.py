@@ -14,8 +14,7 @@ GET_DESCRIPTOR = 0x06
 dev = usb.core.find(idVendor=0x0451, idProduct=0x3200)
 if dev:
   dev.set_configuration()
-  data = dev.ctrl_transfer(0x80, GET_DESCRIPTOR, 0x0101, 0, 64)
-  print(repr(data))
+  print('Found TUSB3200 in maskrom DFU mode, uploading stage2 bootloader...')
 
   # Original TUSB3200 bootrom has very limited api, can upload at most
   # 4096 bytes?
@@ -26,7 +25,7 @@ if dev:
     fname = sys.argv[1]
   print('Sending %r to device' % fname)
   with open(fname, "rb") as f:
-    data = [ord(x) for x in f.read()]
+    data = f.read()
     print('Sending %d bytes...' % len(data))
     dev.ctrl_transfer(0x41, 0x01, 0, 0, data)
 

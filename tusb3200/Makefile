@@ -3,7 +3,7 @@
 all: boot.eep
 
 clean:
-	rm -f *.ihx *.lst *.rel *.map *.sym *.mem *.rst *~ mkeep
+	rm -f *.bin *.eep *.ihx *.lst *.rel *.map *.sym *.mem *.rst *~ mkeep
 
 mkeep: mkeep.c
 
