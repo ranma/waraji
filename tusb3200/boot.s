@@ -64,6 +64,49 @@
 .error 1; EP0 buffer start out of range
 .endif
 
+.equ ENABLE_DEBUG, 0
+
+.macro debug_xind_hex src
+.ifeq ENABLE_DEBUG - 1
+	mov R0, #src
+	movx A, @R0
+	acall serial_hex
+.endif
+.endm
+
+.macro debug_var_hex var
+.ifeq ENABLE_DEBUG - 1
+	mov A, var
+	acall serial_hex
+.endif
+.endm
+
+.macro debug_hex
+.ifeq ENABLE_DEBUG - 1
+	acall serial_hex
+.endif
+.endm
+
+.macro debug_write
+.ifeq ENABLE_DEBUG - 1
+	acall serial_write
+.endif
+.endm
+
+.macro debug_putc c
+.ifeq ENABLE_DEBUG - 1
+	mov A, #c
+	acall serial_write
+.endif
+.endm
+
+.macro debug_puts msg
+.ifeq ENABLE_DEBUG - 1
+	mov DPTR, #msg
+	acall serial_puts
+.endif
+.endm
+
 .macro dispatch_address handler
 	.iflt handler - . - 1
 	.error 1 ; handler adress out of range
@@ -193,6 +236,7 @@ clear_iram:
 
 	mov SP, #stack
 
+.ifeq ENABLE_DEBUG - 1
 	; Set up UART
 	mov RCAP2H, #0xff
 	mov RCAP2L, #0xf3 ; 57600 baud (~57692; 0.16% error)
@@ -200,6 +244,7 @@ clear_iram:
 	mov SCON, #0x50
 	mov TH2, #0xff
 	mov TL2, #0xff
+.endif
 
 	; Port defaults
 	mov P2, #0xff  ; Select 0xff00 as base for MOVX with R0/R1
@@ -276,8 +321,7 @@ rop_template_end:
 	; Entry point after relocation to end of code ram
 	;------------------------------------------------
 _bootloader_start:
-	mov DPTR, #message_hello
-	acall serial_puts
+	debug_puts message_hello
 
 	acall usb_init
 
@@ -313,28 +357,21 @@ vec_dispatch:
 	dispatch_address vec_default
 
 vec_default:
-	mov A, #'V'
-	acall serial_write
-	mov R0, #USBIMSK
-	movx A, @R0
-	acall serial_hex  ; Dump mask
-	mov R0, #VECINT
-	movx A, @R0
-	acall serial_hex  ; Dump vec num
+	debug_putc 'V'
+	debug_xind_hex USBIMSK
+	debug_xind_hex VECINT
 	ret
 
 vec_reset:
 	; Turn off power
 	setb P1.6
 
-	mov DPTR, #message_rst
-	acall serial_puts
+	debug_puts message_rst
 	acall usb_init
 	ret
 
 vec_in_ep0:
-	mov A, #'i'
-	acall serial_write
+	debug_putc 'i'
 	acall write_to_ep0
 	jbc usbStateSetAddress, vec_in_ep0_set_addr
 	ret
@@ -347,10 +384,8 @@ vec_in_ep0_set_addr:
 	movx @R0, A
 	setb usbStateAddressValid
 
-	mov A, #'A'
-	acall serial_write
-	mov A, R7
-	acall serial_hex
+	debug_putc 'A'
+	debug_var_hex R7
 
 	;mov R0, #IEPCNF0
 	;movx A, @R0
@@ -359,8 +394,7 @@ vec_in_ep0_set_addr:
 	ret
 
 vec_out_ep0:
-	mov A, #'o'
-	acall serial_write
+	debug_putc 'o'
 	ret
 
 fetchc_postinc:
@@ -370,10 +404,8 @@ fetchc_postinc:
 	ret
 
 vec_setup:
-	mov A, #' '
-	acall serial_write
-	mov A, #'S'
-	acall serial_write
+	debug_putc '\040'
+	debug_putc 'S'
 
 	; Unstall endpoints
 	mov A, #0xa4  ; Unstall in EP0
@@ -603,12 +635,9 @@ setup_dth_get_desc_configuration:
 	sjmp setup_dth_get_desc
 
 setup_dth_get_desc_bad:
-	mov A, #'d'
-	acall serial_write
-	mov A, wValueHi
-	acall serial_hex
-	mov A, wValueLo
-	acall serial_hex
+	debug_putc 'd'
+	debug_var_hex wValueHi
+	debug_var_hex wValueLo
 	ret
 
 setup_htd_dev_set_address:
@@ -616,8 +645,7 @@ setup_htd_dev_set_address:
 	mov R0, #IEPDCNTX0
 	clr A
 	movx @R0, A
-	mov A, #'a'
-	acall serial_write
+	debug_putc 'a'
 	ret
 
 setup_htd_dev_set_configuration:
@@ -626,8 +654,7 @@ setup_htd_dev_set_configuration:
 	movx @R0, A
 	mov R0, #OEPDCNTX0
 	movx @R0, A
-	mov A, #'c'
-	acall serial_write
+	debug_putc 'c'
 
 	; Turn on power
 	clr P1.6
@@ -636,10 +663,8 @@ setup_htd_dev_set_configuration:
 
 setup_default:
 	clr usbStateSetupValid
-	mov A, bmRequestType
-	acall serial_hex
-	mov A, bRequest
-	acall serial_hex
+	debug_var_hex bmRequestType
+	debug_var_hex bRequest
 	ret
 
 dispatch:
@@ -662,7 +687,7 @@ write_to_ep0:
 	jnb usbStateAddressValid, write_to_ep0_addr_not_set
 	mov A, #'W'
 write_to_ep0_addr_not_set:
-	acall serial_write
+	debug_write
 
 	mov DPH, txPtrHi
 	mov DPL, txPtrLo
@@ -713,7 +738,7 @@ write_empty_to_ep0:
 	mov R0, #IEPDCNTX0
 	mov A, R1     ; Then un-nak and write the new count
 	movx @R0, A
-	acall serial_hex
+	debug_hex
 	clr C
 	mov A, R1
 	subb A, #EP0_BYTES
@@ -728,8 +753,7 @@ write_done:
 write_not_yet_done:
 	ret
 write_stall_ep0:
-	mov A, #'s'
-	acall serial_write
+	debug_putc 's'
 	mov R0, #IEPCNF0  ; Stall for IN
 	movx A, @R0
 	orl A, #8
@@ -754,6 +778,7 @@ usb_init_end:
 serial_puts_done:
 	ret
 
+.ifeq ENABLE_DEBUG - 1
 serial_puts:
 	acall fetchc_postinc
 	jz serial_puts_done
@@ -785,6 +810,7 @@ serial_write:
 serial_write_wait:
 	jnb TI,serial_write_wait
 	ret
+.endif  ; ENABLE_DEBUG
 
 code_poke:
 	acall raw_code_poke
@@ -880,9 +906,11 @@ usb_cnf_desc:
 usb_status_ok:
 .byte 0, 0
 
+.ifeq ENABLE_DEBUG - 1
 message_hello:
 .ascii "\r\nHello world!\r\n\0"
 message_rst:
 .ascii "\r\nR\0"
+.endif ; ENABLE_DEBUG
 
 _bootloader_end:
