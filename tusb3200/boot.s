@@ -34,6 +34,10 @@
 .equ OEPDCNTX0, 0xffab
 .equ SETUP_PKT, 0xff28
 .equ MEMCFG,    0xffb0
+.equ I2CCTL,    0xffc0
+.equ I2CDATO,   0xffc1
+.equ I2CDATI,   0xffc2
+.equ I2CADR,    0xffc3
 .equ USBFADR,   0xffff
 .equ USBIMSK,   0xfffd
 
@@ -522,6 +526,7 @@ setup_dth_vend_reboot_bootloader:
 
 setup_dth_vend_write_i2c:
 	; TODO: Implement this
+	ret
 
 setup_dth_vend_write_iram:
 	mov DPTR, #(write_sfr_patch_op + 1)
@@ -559,12 +564,87 @@ vend_finish_byte_write:
 	movx @R0, A
 	ret
 
+i2c_set_adr:
+	; Device address (0-7) in wValueHi
+	mov R0, wValueHi
+	mov A, @R0
+	rlc  A  ; Carry is shifted in as write/read bit here
+	anl A, #0x0f
+	; Upper nibble ("Control code") of 24C64 address
+	orl A, #0xa0
+	mov R0, #I2CADR
+	movx @R0, A
+	ret
+
+i2c_read_byte:
+	setb C   ; Read
+	acall i2c_set_adr
+	mov R0, #I2CDATO
+	movx @R0, A
+	mov A, #0xa0  ; Error or recv buffer full
+	acall i2c_wait
+	mov R0, #I2CDATI
+	movx A, @R0
+	ret
+
+i2c_send_byte:
+	push ACC
+	clr C   ; Write
+	acall i2c_set_adr
+	pop ACC
+	mov R0, #I2CDATO
+	movx @R0, A
+	mov A, #0x28  ; Error or xmit buffer empty
+
+	; fall through to i2c_wait
+
+i2c_wait:
+	mov R2, A      ; Mask to check against
+	; At 2 MIPS (24MHz) and 400kHz I2C, we have about 5 machine
+	; instructions per I2C bit. The loop below is 5 ins, so
+	; this is roughly how many bits we'll wait before timing out.
+	mov R3, #80
+i2c_wait_loop:
+	mov R0, #I2CCTL
+	movx A, @R0
+	anl A, R2
+	jnz i2c_wait_exit
+	djnz R3, i2c_wait_loop
+i2c_wait_exit:
+	ret
+
+i2c_write_ctl:
+	mov R0, #I2CCTL
+	movx @R0, A
+	ret
+
 setup_dth_vend_read_i2c:
-	; TODO: Implement this
+	mov A, #0x10  ; Select 400kHz mode
+	acall i2c_write_ctl
+
+	mov A, wIndexHi
+	acall i2c_send_byte
+	mov A, wIndexLo
+	acall i2c_send_byte
+
+	mov A, #0x12  ; 400kHz mode, stop read
+	acall i2c_write_ctl
+	acall i2c_read_byte
+
+setup_dth_vend_read_i2c_exit:
+	mov R0, #EP0_IN
+	movx @R0, A
+	clr A
+	mov R0, #OEPDCNTX0
+	movx @R0, A
+	inc A
+	mov R0, #IEPDCNTX0
+	movx @R0, A
+	setb usbStateIn0Done
+	ret
 
 setup_dth_vend_read_iram:
 	mov R0, wIndexLo
-	clr A
 	mov A, @R0
 	sjmp vend_finish_byte_read
 

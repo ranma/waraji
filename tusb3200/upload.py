@@ -11,6 +11,11 @@ BTC_I2C_MEMORY_READ = 0x92
 GET_STATUS = 0x00
 GET_DESCRIPTOR = 0x06
 
+I2C_CTL  = 0xffc0
+I2C_DATO = 0xffc1
+I2C_DATI = 0xffc2
+I2C_ADR  = 0xffc3
+
 dev = usb.core.find(idVendor=0x0451, idProduct=0x3200)
 if dev:
   dev.set_configuration()
@@ -55,6 +60,17 @@ def read_xram(a):
 def write_xram(a, d):
   return dev.ctrl_transfer(0x40, 0x91, d, a, 0)
 
+def manual_read_i2c(a):
+  print('manual_read_i2c(%04x)' % a)
+  write_xram(I2C_CTL, 0x10)      # 400kHz mode
+  write_xram(I2C_ADR, 0xa0)      # 10100000 (24c64 address 0, write)
+  write_xram(I2C_DATO, a >> 8)   # High address byte
+  write_xram(I2C_DATO, a & 0xff) # Low address byte
+  write_xram(I2C_CTL, 0x12)      # 400kHz mode, no further reads
+  write_xram(I2C_ADR, 0xa1)      # 10100001 (24c64 address 0, read)
+  write_xram(I2C_DATO, 0xff)     # Dummy write to trigger read
+  return read_xram(I2C_DATI)
+
 def read_i2c(a):
   return dev.ctrl_transfer(0xc0, 0x92, 0, a, 1)[0]
 
@@ -82,9 +98,14 @@ def write_sfr(a, d):
 def reboot_bootloader():
   return dev.ctrl_transfer(0x40, 0x85, 0, 0, 0)
 
-for a in range(256):
-  d = read_sfr(a)
-  print('sfr@%02x=%02x' % (a, d))
+
+print('I2CCTL=%02x' % read_xram(I2C_CTL))
+print('I2CADR=%02x' % read_xram(I2C_ADR))
+print('I2CDATO=%02x' % read_xram(I2C_DATO))
+
+for a in range(16):
+  d = read_i2c(a)
+  print('i2c@%02x=%02x' % (a, d))
 
 # Reboot back into the original bootloader:
 #time.sleep(2)
